@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # =========================================================
+  # 1. SERVIÇOS DE GATEWAY / INFRAESTRUTURA
+  # =========================================================
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false 
+      - --entrypoints.web.address=:80
+      - --api.insecure=true 
+    ports:
+      - "80:80"      # Ponto de entrada para o tráfego HTTP
+      - "8080:8080"  # Dashboard do Traefik
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - node-api-connect
+    
+  node-api-mysql:
+    container_name: node-api-mysql
+    image: mysql
+    environment:
+      MYSQL_USER: nodeapi_root
+      MYSQL_PASSWORD: j5m966qp7jiypfda
+      MYSQL_ROOT_PASSWORD: m45ug42qkr5pdzbb
+      MYSQL_DATABASE: node_api
+    volumes:
+      - ~/docker/volumes/NodeApi_MySQL:/var/lib/mysql
+    networks:
+      - node-api-connect
+    logging:
+      driver: none
+
+  # =========================================================
+  # 2. SERVIÇO ALVO (NODE API)
+  # =========================================================
+  node-api:
+    container_name: node-api
+    build:
+      context: ./node-api-boilerplate 
+      target: development
+    volumes:
+      - ./node-api-boilerplate:/app
+      - /app/node_modules 
+    command: npm run start:dev
+    environment:
+      NODE_ENV: development
+      SERVER_PORT: 4444
+      DB_DATABASE: node_api
+      DB_CONNECTION_STRING: mysql://nodeapi_root:j5m966qp7jiypfda@node-api-mysql:3306/node_api
+    networks:
+      - node-api-connect
+    depends_on:
+      - node-api-mysql
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.node-api.rule=Host(`localhost`) || Host(`traefik`)"
+      - "traefik.http.routers.node-api.entrypoints=web"
+      - "traefik.http.routers.node-api.service=node-api" 
+      - "traefik.http.services.node-api.loadbalancer.server.port=4444" 
+      - "traefik.http.middlewares.rate-limit.ratelimit.average=50"
+      - "traefik.http.middlewares.rate-limit.ratelimit.burst=100"
+      - "traefik.http.routers.node-api.middlewares=rate-limit@docker"
+
+  # =========================================================
+  # 3. SERVIÇOS DE TESTE (LOCUST)
+  # =========================================================
+  master:
+    image: locustio/locust
+    container_name: locust_master
+    ports:
+      - '8089:8089' 
+    volumes:
+      - ./locust-performance-test:/mnt/locust 
+    command: -f /mnt/locust/locustfile.py --master 
+    networks:
+      - node-api-connect
+    depends_on:
+      - traefik
+      - node-api
+
+  worker:
+    image: locustio/locust
+    container_name: locust_worker
+    volumes:
+      - ./locust-performance-test:/mnt/locust
+    command: -f /mnt/locust/locustfile.py --worker --master-host master
+    networks:
+      - node-api-connect
+    depends_on:
+      - master
+
+networks:
+  node-api-connect:
+    name: node-api-connect
+    driver: bridge
